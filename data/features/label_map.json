@@ -1,0 +1,20 @@
+{
+  "id2label": {
+    "0": "B-DATE",
+    "1": "B-ITEM",
+    "2": "B-MERCHANT",
+    "3": "B-PRICE",
+    "4": "B-RECEIPT_NO",
+    "5": "B-TOTAL",
+    "6": "O"
+  },
+  "label2id": {
+    "B-DATE": 0,
+    "B-ITEM": 1,
+    "B-MERCHANT": 2,
+    "B-PRICE": 3,
+    "B-RECEIPT_NO": 4,
+    "B-TOTAL": 5,
+    "O": 6
+  }
+}
