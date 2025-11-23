@@ -14,7 +14,7 @@ sys.path.insert(0, str(SRC_DIR))
 import os, json, argparse
 from datasets import load_from_disk
 from transformers import (
-    LayoutLMv3ForTokenClassification,
+    AutoModelForTokenClassification,
     TrainingArguments,
     Trainer,
     set_seed,
@@ -32,7 +32,7 @@ def parse_args():
     ap.add_argument("--data_dir",  default="./data/features", help="HF dataset (save_to_disk).")
     ap.add_argument("--label_map", default=None, help="label_map.json (defaults to <data_dir>/label_map.json).")
     ap.add_argument("--out_dir",   default="./data/output/", help="Output dir for checkpoints & report.")
-    ap.add_argument("--model_name", default="microsoft/layoutlmv3-base")
+    ap.add_argument("--model_name", default="")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--lr",     type=float, default=5e-5)
     ap.add_argument("--train_bsz", type=int, default=2)
@@ -47,8 +47,6 @@ def parse_args():
 
     # optional noise-aware collator
     ap.add_argument("--noise_config", default="./config/augmentation.json", help="Path to augmentation.json to enable noise-aware collator.")
-    ap.add_argument("--eval_noise_aware", action="store_true",
-                    help="Also run AFTER test evaluation using noisy collator (robustness).")
     return ap.parse_args()
 
 def main():
@@ -63,7 +61,8 @@ def main():
     print(f"Train size: {len(train_ds)} | Val size: {len(eval_ds)} | Test size: {len(test_ds) if test_ds else 0}")
 
     # 2) Model
-    model = LayoutLMv3ForTokenClassification.from_pretrained(
+    # 2) Model (architecture-agnostic)
+    model = AutoModelForTokenClassification.from_pretrained(
         args.model_name,
         num_labels=len(id2label),
         id2label=id2label,
@@ -137,7 +136,7 @@ def main():
         report["test_after"] = test_after
 
         # Optional robustness: evaluate with noise-aware collator
-        if args.noise_config and args.eval_noise_aware and train_collator is not None:
+        if args.noise_config and train_collator is not None:
             if hasattr(train_collator, "rng"):
                 train_collator.rng.seed(args.seed)
             trainer.data_collator = train_collator

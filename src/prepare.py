@@ -19,7 +19,7 @@ from typing import Optional, List
 
 import torch
 from datasets import load_dataset, DatasetDict
-from transformers import AutoProcessor
+from transformers import AutoProcessor, AutoTokenizer
 from PIL import Image
 
 def find_image_path(img_dir: str, stem: str) -> Optional[str]:
@@ -104,54 +104,193 @@ def main(args):
     tmp = ds_all.train_test_split(test_size=0.2, seed=42)
     val_test = tmp["test"].train_test_split(test_size=0.5, seed=42)
     ds = DatasetDict(train=tmp["train"], validation=val_test["train"], test=val_test["test"])
+    
 
     # 4) Label maps
-    all_labels = set()
-    for row in ds_all:
-        all_labels.update(row["labels"])
-    label_list = sorted(all_labels)
-    label2id = {l: i for i, l in enumerate(label_list)}
-    id2label = {i: l for l, i in label2id.items()}
-    print(f"Labels ({len(label_list)}): {label_list}")
+    # 4) Label maps (prefer existing; otherwise build from data)
+    existing_map = os.path.join(os.path.dirname(jsonl_path), "label_map.json")
+    if os.path.exists(existing_map):
+        with open(existing_map, "r", encoding="utf-8") as f:
+            info = json.load(f)
+        label_list = info.get("label_list")
+        label2id   = {str(k): int(v) for k, v in info.get("label2id", {}).items()} if info.get("label2id") else {
+            l: i for i, l in enumerate(label_list)
+        }
+        id2label   = {int(k): v for k, v in info.get("id2label", {}).items()} if info.get("id2label") else {
+            i: l for l, i in label2id.items()
+        }
+        # sanity: ensure all labels in data exist in the map
+        data_labels = {y for row in ds_all for y in row["labels"]}
+        missing = sorted(list(data_labels - set(label2id.keys())))
+        if missing:
+            raise ValueError(f"Label map missing classes present in data: {missing}")
+    else:
+        # build from data if no map is present
+        all_labels = sorted({y for row in ds_all for y in row["labels"]})
+        label_list = all_labels
+        label2id   = {l: i for i, l in enumerate(label_list)}
+        id2label   = {i: l for l, i in label2id.items()}
 
-    # 5) Processor
-    processor = AutoProcessor.from_pretrained("microsoft/layoutlmv3-base", apply_ocr=False)
+    
+    def is_layoutlm_v1(name: str) -> bool:
+        return "layoutlm-base" in name.lower()
 
-    # 6) Encode (normalize to 0–1000; return unbatched tensors via squeeze(0))
-    def encode(example):
+    def is_lilt(name: str) -> bool:
+        return "lilt" in name.lower()
+
+    def is_vision_layout(name: str) -> bool:
+        n = name.lower()
+        return ("layoutlmv2" in n) or ("layoutlmv3" in n) or ("layoutxlm" in n)
+    
+    model_name = args.model_name
+
+    if is_lilt(model_name) or is_layoutlm_v1(model_name):
+        tokenizer = AutoTokenizer.from_pretrained(model_name)   # text-only models
+        processor = None
+    elif is_vision_layout(model_name):
+        processor = AutoProcessor.from_pretrained(model_name, apply_ocr=False)  # vision models
+        tokenizer = getattr(processor, "tokenizer", None)
+    else:
+        # default: assume vision model
+        processor = AutoProcessor.from_pretrained(model_name, apply_ocr=False)
+        tokenizer = getattr(processor, "tokenizer", None)
+
+    # Clear, explicit boolean:
+    text_only = is_lilt(model_name) or is_layoutlm_v1(model_name)
+
+    if text_only:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)  # LayoutLM v1 / LiLT
+    else:
+        processor = AutoProcessor.from_pretrained(model_name, apply_ocr=False)  # v2/v3/xlm
+
+    def encode_vision(example):
         image = Image.open(example["image_path"]).convert("RGB")
         W, H = image.size
-
         words = example["tokens"]
-        boxes_in = example["bboxes"]
-        labels_str = example["labels"]
-
-        if not (len(words) == len(boxes_in) == len(labels_str)):
-            raise ValueError(
-                f"Length mismatch for id={example.get('id')}: "
-                f"tokens={len(words)} boxes={len(boxes_in)} labels={len(labels_str)}"
-            )
-
-        boxes_px = [ensure_aabb(b) for b in boxes_in]
+        boxes_px = [ensure_aabb(b) for b in example["bboxes"]]
         boxes_1000 = [normalize_box_0_1000_px(b, W, H) for b in boxes_px]
-        word_labels = [label2id[l] for l in labels_str]
+        word_labels = [label2id[l] for l in example["labels"]]
 
         enc = processor(
-            image,
-            words,
+            images=image,                                  # <-- explicit name
+            text=words,       
             boxes=boxes_1000,
             word_labels=word_labels,
             truncation=True,
             padding="max_length",
             max_length=512,
-            return_tensors="pt",  # get per-sample tensors
+            return_tensors="pt",
         )
-        # Remove the per-sample batch dim so Trainer can batch later
         enc = {k: (v.squeeze(0) if isinstance(v, torch.Tensor) else v) for k, v in enc.items()}
         return enc
+    
+
+    def encode_text_only(example):
+        words = example["tokens"]
+        # no image; still normalize bboxes to 0–1000 using the image size if you want consistent scale
+        image = Image.open(example["image_path"]).convert("RGB")
+        W, H = image.size
+        boxes_px = [ensure_aabb(b) for b in example["bboxes"]]
+        boxes_1000 = [normalize_box_0_1000_px(b, W, H) for b in boxes_px]
+        word_labels = [label2id[l] for l in example["labels"]]
+
+        # tokenize words
+        tok = tokenizer(
+            words,
+            is_split_into_words=True,
+            truncation=True,
+            padding="max_length",
+            max_length=512,
+            return_tensors="pt",
+        )
+
+        # align bboxes/labels to subwords using word_ids()
+        word_ids = tok.word_ids(batch_index=0)  # list[Optional[int]] length = seq_len
+        aligned_boxes, aligned_labels = [], []
+        previous_word_idx = None
+        for wi in word_ids:
+            if wi is None:
+                aligned_boxes.append([0, 0, 0, 0])
+                aligned_labels.append(-100)          # mask specials/pad
+            else:
+                # label only the first subword of each word (common practice)
+                if wi != previous_word_idx:
+                    aligned_boxes.append(boxes_1000[wi])
+                    aligned_labels.append(word_labels[wi])
+                else:
+                    aligned_boxes.append(boxes_1000[wi])
+                    aligned_labels.append(-100)      # mask subsequent subwords
+            previous_word_idx = wi
+
+        # build the batch dict; no pixel_values for v1/LiLT
+        enc = {
+            "input_ids": tok["input_ids"].squeeze(0),
+            "attention_mask": tok["attention_mask"].squeeze(0),
+            "bbox": torch.tensor(aligned_boxes, dtype=torch.long),
+            "labels": torch.tensor(aligned_labels, dtype=torch.long),
+        }
+        return enc
+
+    def encode_lilt(example):
+        words = example["tokens"]
+        image = Image.open(example["image_path"]).convert("RGB")
+        W, H = image.size
+        boxes_px = [ensure_aabb(b) for b in example["bboxes"]]
+        boxes_1000 = [normalize_box_0_1000_px(b, W, H) for b in boxes_px]
+        word_labels = [label2id[l] for l in example["labels"]]
+
+        # Some versions support is_split_into_words, some don't. Try w/ it, fallback w/o.
+        try:
+            tok = tokenizer(
+                words,
+                boxes=boxes_1000,
+                is_split_into_words=True,
+                truncation=True,
+                padding="max_length",
+                max_length=512,
+                return_tensors="pt",
+            )
+        except TypeError:
+            # older tokenizer API: no is_split_into_words kw; still accepts list[str] and boxes
+            tok = tokenizer(
+                words,
+                boxes=boxes_1000,
+                truncation=True,
+                padding="max_length",
+                max_length=512,
+                return_tensors="pt",
+            )
+
+        # Align labels to subwords using word_ids (works in both cases)
+        word_ids = tok.word_ids(0)
+        aligned_labels = []
+        prev = None
+        for wi in word_ids:
+            if wi is None:
+                aligned_labels.append(-100)
+            else:
+                if wi != prev:
+                    aligned_labels.append(word_labels[wi])  # first subword of a word
+                else:
+                    aligned_labels.append(-100)             # subsequent subwords
+            prev = wi
+
+        return {
+            "input_ids": tok["input_ids"].squeeze(0),
+            "attention_mask": tok["attention_mask"].squeeze(0),
+            "bbox": tok["bbox"].squeeze(0),   # already expanded to subwords by tokenizer
+            "labels": torch.tensor(aligned_labels, dtype=torch.long),
+        }
+
+    if is_lilt(model_name):
+        encode_fn = encode_lilt
+    elif is_layoutlm_v1(model_name):
+        encode_fn = encode_text_only  # your LayoutLMv1 path
+    else:
+        encode_fn = encode_vision
 
     encoded = ds.map(
-        encode,
+        encode_fn,
         remove_columns=ds["train"].column_names,
         desc="Encoding examples",
     )
@@ -173,5 +312,6 @@ if __name__ == "__main__":
     p.add_argument("--jsonl",  default="./data/processed.jsonl", help="Path to processed.jsonl")
     p.add_argument("--images", default="./data/raw/images", help="Directory containing original images")
     p.add_argument("--out",    default="./data/features", help="Output directory (save_to_disk)")
+    p.add_argument("--model_name", default="", help="HF model/processor name to encode with")
     args = p.parse_args()
     main(args)
