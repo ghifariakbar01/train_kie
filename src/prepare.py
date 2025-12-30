@@ -133,7 +133,8 @@ def main(args):
 
     
     def is_layoutlm_v1(name: str) -> bool:
-        return "layoutlm-base" in name.lower()
+        print("is layuoutlm based")
+        return "layoutlm-base-uncased" in name.lower()
 
     def is_lilt(name: str) -> bool:
         return "lilt" in name.lower()
@@ -141,27 +142,31 @@ def main(args):
     def is_vision_layout(name: str) -> bool:
         n = name.lower()
         return ("layoutlmv2" in n) or ("layoutlmv3" in n) or ("layoutxlm" in n)
-    
-    model_name = args.model_name
 
-    if is_lilt(model_name) or is_layoutlm_v1(model_name):
-        tokenizer = AutoTokenizer.from_pretrained(model_name)   # text-only models
-        processor = None
-    elif is_vision_layout(model_name):
-        processor = AutoProcessor.from_pretrained(model_name, apply_ocr=False)  # vision models
-        tokenizer = getattr(processor, "tokenizer", None)
-    else:
-        # default: assume vision model
-        processor = AutoProcessor.from_pretrained(model_name, apply_ocr=False)
-        tokenizer = getattr(processor, "tokenizer", None)
+    def setup_io(model_name: str):
+        n = model_name.lower()
+        if is_lilt(model_name) or is_layoutlm_v1(model_name):
+            # Text-only models (no pixel_values)
+            tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            processor = None
+            mode = "text_only"
+        elif is_vision_layout(model_name):
+            # Vision models (need pixel_values + bbox)
+            processor = AutoProcessor.from_pretrained(model_name, apply_ocr=False)
+            tokenizer = getattr(processor, "tokenizer", None)
+            mode = "vision"
+        else:
+            # Default: treat as vision model
+            processor = AutoProcessor.from_pretrained(model_name, apply_ocr=False)
+            tokenizer = getattr(processor, "tokenizer", None)
+            mode = "vision"
+        return processor, tokenizer, mode
 
-    # Clear, explicit boolean:
-    text_only = is_lilt(model_name) or is_layoutlm_v1(model_name)
+    # ---- use it ----
+    processor, tokenizer, mode = setup_io(args.model_name)
+    text_only = (mode == "text_only")
+    print(text_only)
 
-    if text_only:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)  # LayoutLM v1 / LiLT
-    else:
-        processor = AutoProcessor.from_pretrained(model_name, apply_ocr=False)  # v2/v3/xlm
 
     def encode_vision(example):
         image = Image.open(example["image_path"]).convert("RGB")
@@ -172,7 +177,7 @@ def main(args):
         word_labels = [label2id[l] for l in example["labels"]]
 
         enc = processor(
-            images=image,                                  # <-- explicit name
+            images=image,                                  
             text=words,       
             boxes=boxes_1000,
             word_labels=word_labels,
@@ -282,12 +287,7 @@ def main(args):
             "labels": torch.tensor(aligned_labels, dtype=torch.long),
         }
 
-    if is_lilt(model_name):
-        encode_fn = encode_lilt
-    elif is_layoutlm_v1(model_name):
-        encode_fn = encode_text_only  # your LayoutLMv1 path
-    else:
-        encode_fn = encode_vision
+    encode_fn = encode_vision if not text_only else (encode_lilt if is_lilt(args.model_name) else encode_text_only)
 
     encoded = ds.map(
         encode_fn,

@@ -61,7 +61,6 @@ def main():
     print(f"Train size: {len(train_ds)} | Val size: {len(eval_ds)} | Test size: {len(test_ds) if test_ds else 0}")
 
     # 2) Model
-    # 2) Model (architecture-agnostic)
     model = AutoModelForTokenClassification.from_pretrained(
         args.model_name,
         num_labels=len(id2label),
