@@ -309,7 +309,7 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--jsonl",  default="./data/processed.jsonl", help="Path to processed.jsonl")
+    p.add_argument("--jsonl",  default="./data/processed_2.jsonl", help="Path to processed.jsonl")
     p.add_argument("--images", default="./data/raw/images", help="Directory containing original images")
     p.add_argument("--out",    default="./data/features", help="Output directory (save_to_disk)")
     p.add_argument("--model_name", default="", help="HF model/processor name to encode with")
