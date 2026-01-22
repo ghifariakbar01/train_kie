@@ -1,9 +1,8 @@
 ./data/**
 ./data/
 /data/
-/runs/layoutlm-base-uncased/checkpoint-1200/**
 /runs/layoutlm-base-uncased/checkpoint-4000/**
-/runs/layoutlmv3-base/checkpoint-2400/**
 /runs/layoutlmv3-base/checkpoint-4000/**
-/runs/lilt-roberta-en-base/checkpoint-2400/**
+/runs/lilt-roberta-en-base/checkpoint-3600/**
 /runs/lilt-roberta-en-base/checkpoint-4000/**
+/chagpt_mds/

@@ -20,6 +20,7 @@ from transformers import (
     set_seed,
 )
 
+from helper.data_balancing import compute_label_weights, WeightedTokenTrainer
 from helper.metrics import compute_metrics_builder
 from helper.utils import (
     load_label_maps,
@@ -41,7 +42,7 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=42)
 
     # device/precision
-    ap.add_argument("--no_cuda", action="store_true", help="Force CPU.")
+    # ap.add_argument("--no_cuda", action="store_true", help="Force CPU.")
     ap.add_argument("--fp16", action="store_true", help="Enable FP16 (CUDA only).")
     ap.add_argument("--bf16", action="store_true", help="Enable BF16 (CUDA only).")
 
@@ -58,9 +59,10 @@ def main():
     label_map_path = args.label_map or os.path.join(args.data_dir, "label_map.json")
     label2id, id2label = load_label_maps(label_map_path)
     train_ds, eval_ds, test_ds = ensure_splits(ds)
+    class_weights = compute_label_weights(train_ds, len(id2label))
     print(f"Train size: {len(train_ds)} | Val size: {len(eval_ds)} | Test size: {len(test_ds) if test_ds else 0}")
 
-    # 2) Model
+      # 2) Model
     model = AutoModelForTokenClassification.from_pretrained(
         args.model_name,
         num_labels=len(id2label),
@@ -98,15 +100,17 @@ def main():
         report_to=[],         # no TB/W&B by default
         save_total_limit=2,
         seed=args.seed,
+        remove_unused_columns=False,
     )
 
-    trainer = Trainer(
+    trainer = WeightedTokenTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
         compute_metrics=compute_metrics_builder(id2label),
         data_collator=train_collator,  # may be None; Trainer falls back to default
+        class_weights=class_weights,
     )
 
     report = {}
